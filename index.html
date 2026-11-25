@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<meta name="robots" content="noindex">
+<title>記録中…</title>
+<style>
+  body { margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center;
+         background:#123A2B; color:#F3F1EA; font-family:"Hiragino Sans","Noto Sans JP",system-ui,sans-serif; }
+</style>
+<script>
+  // ここにGASウェブアプリのURL（…/exec）を貼る
+  var EXEC = 'https://script.google.com/macros/s/AKfycbyqKFvYz7dOYcxWFP7--sijMCZjTJ6RMNeJrahCy8LcZwexGFZ2g3ofli4Wt3KZmnOhGg/exec';
+
+  // ?As / ?START / ?BOARD2 の形で届く（キーなし）。念のため ?card=As にも対応
+  var q = location.search.slice(1).split('&')[0];
+  var card = q.indexOf('card=') === 0 ? q.slice(5) : q;
+  card = card.replace(/[^0-9A-Za-z]/g, '').slice(0, 6);
+
+  // 履歴に残さず移動（戻るボタンで二重記録しないように）
+  location.replace(EXEC + (card ? '?card=' + card : ''));
+</script>
+</head>
+<body>
+<p>記録ページに移動しています…</p>
+</body>
+</html>
