@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>NFCスキャン</title>
+<style>
+  :root { --felt:#123A2B; --ink:#F3F1EA; --muted:#B9C7BF; --ok:#7FD3A4; --warn:#F2C46D; --err:#FF9C8A; }
+  * { box-sizing:border-box; }
+  body { margin:0; min-height:100vh; background:var(--felt); color:var(--ink);
+         font-family:"Hiragino Sans","Noto Sans JP",system-ui,sans-serif;
+         display:flex; align-items:center; justify-content:center; padding:24px; }
+  main { width:100%; max-width:420px; text-align:center; }
+  .pill { display:inline-block; font-size:14px; padding:6px 14px; border-radius:999px;
+          border:1.5px solid var(--ok); color:var(--ok); margin-bottom:28px; }
+  .mark { font-size:72px; line-height:1; margin-bottom:16px; min-height:72px; }
+  h1 { font-size:26px; margin:0 0 10px; line-height:1.4; }
+  p { margin:0; color:var(--muted); font-size:16px; line-height:1.6; }
+  label { display:block; text-align:left; font-size:15px; margin:20px 0 8px; }
+  input { width:100%; font-size:20px; padding:14px; border-radius:10px; border:0; }
+  button { width:100%; min-height:52px; font-size:18px; font-weight:700; border-radius:10px;
+           border:0; margin-top:12px; background:var(--ink); color:var(--felt); }
+  button.sub { background:transparent; color:var(--ink); border:1.5px solid var(--muted); font-weight:500; }
+  button.link { width:auto; background:none; border:0; color:var(--muted); text-decoration:underline;
+                font-size:14px; min-height:44px; font-weight:400; margin:0; }
+  .who { margin-top:32px; font-size:14px; color:var(--muted); }
+  .ok { color:var(--ok); } .warn { color:var(--warn); } .err { color:var(--err); }
+  [hidden] { display:none !important; }
+</style>
+</head>
+<body>
+<main>
+  <section id="unsupported" hidden>
+    <h1>このブラウザでは使えません</h1>
+    <p>AndroidのChromeで開いてください。<br>iPhoneの方は、カードをかざす通常の方法で記録できます。</p>
+  </section>
+
+  <section id="setup" hidden>
+    <h1>この端末の名前を登録</h1>
+    <p>動画の編集で表示する名前です。<br>ボード用の端末は「BOARD」にします。</p>
+    <label for="name">名前</label>
+    <input id="name" autocomplete="off" maxlength="20">
+    <button id="save">登録する</button>
+    <button id="asBoard" class="sub">この端末をBOARDにする</button>
+  </section>
+
+  <section id="ready" hidden>
+    <h1>スキャン待ち受け</h1>
+    <p>ボタンを押すと、この画面を開いている間<br>カードをかざすだけで記録されます。</p>
+    <button id="start">スキャン開始</button>
+  </section>
+
+  <section id="scanning" hidden>
+    <div class="pill">● スキャン中</div>
+    <div id="mark" class="mark" aria-hidden="true"></div>
+    <h1 id="msg">カードをかざしてください</h1>
+    <p id="sub"></p>
+  </section>
+
+  <div id="footer" class="who" hidden>
+    <span id="who"></span>
+    <button id="rename" class="link">名前を変更</button>
+  </div>
+</main>
+
+<script>
+  // ここにGASウェブアプリのURL（…/exec）を貼る
+  const EXEC = 'https://script.google.com/macros/s/AKfycbyqKFvYz7dOYcxWFP7--sijMCZjTJ6RMNeJrahCy8LcZwexGFZ2g3ofli4Wt3KZmnOhGg/exec';
+
+  const KEY = 'pokerScanName';
+  const $ = id => document.getElementById(id);
+  let reader = null;
+  let queue = Promise.resolve();      // 送信を1件ずつ順番に（ボードの順番を守るため）
+  let last = { sn: '', t: 0 };        // 同じカードの連続読み取りを無視するため
+  let wakeLock = null;
+
+  function getName() { try { return localStorage.getItem(KEY) || ''; } catch (e) { return ''; } }
+  function setName(v) { try { localStorage.setItem(KEY, v); } catch (e) {} }
+
+  function show(id) {
+    ['unsupported', 'setup', 'ready', 'scanning'].forEach(s => $(s).hidden = (s !== id));
+    const name = getName();
+    $('footer').hidden = !name || id === 'setup' || id === 'unsupported';
+    $('who').textContent = name ? `この端末：${name}` : '';
+  }
+
+  function result(cls, mark, msg, sub) {
+    $('mark').className = 'mark ' + cls;
+    $('mark').textContent = mark;
+    $('msg').textContent = msg;
+    $('sub').textContent = sub || '';
+  }
+
+  function buzz(pattern) { if (navigator.vibrate) navigator.vibrate(pattern); }
+
+  async function keepAwake() {
+    try { wakeLock = await navigator.wakeLock.request('screen'); } catch (e) {}
+  }
+
+  // URLレコードから ?As / ?START / ?card=As のカード部分を取り出す
+  function codeFromRecord(rec) {
+    if (rec.recordType !== 'url' && rec.recordType !== 'absolute-url') return '';
+    let q = '';
+    try { q = new URL(new TextDecoder().decode(rec.data)).search.slice(1); } catch (e) { return ''; }
+    q = q.split('&')[0];
+    if (q.indexOf('card=') === 0) q = q.slice(5);
+    return q.replace(/[^0-9A-Za-z]/g, '').slice(0, 6);
+  }
+
+  function onTag(ev) {
+    const now = Date.now();
+    if (ev.serialNumber && ev.serialNumber === last.sn && now - last.t < 3000) return;
+    last = { sn: ev.serialNumber, t: now };
+
+    let code = '';
+    for (const rec of ev.message.records) { code = codeFromRecord(rec); if (code) break; }
+    if (!code) {
+      result('err', '×', 'カード情報がありません', 'このタグには記録用のURLが書き込まれていません');
+      buzz([200, 100, 200]);
+      return;
+    }
+    result('', '…', '記録しています', '');
+    queue = queue.then(() => send(code));
+  }
+
+  async function send(code) {
+    const url = `${EXEC}?api=1&player=${encodeURIComponent(getName())}&card=${encodeURIComponent(code)}`;
+    try {
+      const res = await fetch(url);
+      const r = await res.json();
+      if (!r.ok) throw new Error(r.error || '記録できませんでした');
+      result(r.sub ? 'warn' : 'ok', r.sub ? '!' : '✓', r.message, r.sub);
+      buzz(r.sub ? [60, 60, 60] : 80);
+    } catch (e) {
+      const why = e.message === 'Failed to fetch' ? '通信できませんでした。電波を確認してください' : e.message;
+      result('err', '×', '記録できませんでした', why);
+      buzz([200, 100, 200]);
+    }
+  }
+
+  async function start() {
+    try {
+      reader = new NDEFReader();
+      await reader.scan();
+      reader.onreading = onTag;
+      reader.onreadingerror = () => result('err', '×', '読み取れませんでした', 'もう一度、少し長めにかざしてください');
+      result('', '', 'カードをかざしてください', '');
+      show('scanning');
+      keepAwake();
+    } catch (e) {
+      show('ready');
+      const why = e.name === 'NotAllowedError'
+        ? 'NFCの使用が許可されていません。アドレスバー左のアイコンから、このサイトのNFCを許可してください'
+        : (e.message || String(e));
+      alert('スキャンを開始できませんでした\n' + why);
+    }
+  }
+
+  function register(v) {
+    v = v.trim();
+    if (!v) { $('name').focus(); return; }
+    setName(v);
+    show(reader ? 'scanning' : 'ready');
+  }
+
+  $('save').onclick = () => register($('name').value);
+  $('asBoard').onclick = () => register('BOARD');
+  $('name').onkeydown = e => { if (e.key === 'Enter') register($('name').value); };
+  $('rename').onclick = () => { $('name').value = getName(); show('setup'); $('name').focus(); };
+  $('start').onclick = start;
+
+  // 画面に戻ってきたらスリープ防止をかけ直す
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && reader) keepAwake();
+  });
+
+  if (!('NDEFReader' in window)) show('unsupported');
+  else if (!getName()) show('setup');
+  else show('ready');
+</script>
+</body>
+</html>
